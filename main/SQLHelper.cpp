@@ -11799,6 +11799,16 @@ bool CSQLHelper::CalcMultiMeterPrice(const uint64_t idx, const float divider, co
 	if (divider == 0)
 		return false;
 
+	// Delivery (return) energy must be priced at the return tariff rates, not the usage rates.
+	// Value1=T1 usage, Value2=R1 delivery, Value5=T2 usage, Value6=R2 delivery.
+	// The stored Price column holds the usage tariff (T1 or T2) active at log time.
+	// CostEnergyR1/R2 from preferences are the correct return prices.
+	int nValue = 0;
+	GetPreferencesVar("CostEnergyR1", nValue);
+	float priceR1 = static_cast<float>(nValue) / 10000.0F;
+	GetPreferencesVar("CostEnergyR2", nValue);
+	float priceR2 = static_cast<float>(nValue) / 10000.0F;
+
 	auto result = safe_query("SELECT Value1, Value2, Value3, Value4, Value5, Value6, Price FROM MultiMeter WHERE (DeviceRowID='%" PRIu64 "' AND Date>='%q' AND Date<='%q 00:00:00') ORDER BY Date ASC",
 		idx, szDateStart, szDateEnd);
 	if (result.empty())
@@ -11806,7 +11816,10 @@ bool CSQLHelper::CalcMultiMeterPrice(const uint64_t idx, const float divider, co
 
 	bool bResult = false;
 	int64_t last_cntrs[6] = { (int64_t)-1,(int64_t)-1,(int64_t)-1,(int64_t)-1,(int64_t)-1,(int64_t)-1 };
-	float total_price[6] = { 0,0,0,0,0,0 };
+	float total_price_usage1 = 0; // T1 usage × stored usage price
+	float total_price_usage2 = 0; // T2 usage × stored usage price
+	float total_price_deliv1 = 0; // R1 delivery × CostEnergyR1
+	float total_price_deliv2 = 0; // R2 delivery × CostEnergyR2
 
 	for (const auto& itt : result)
 	{
@@ -11814,21 +11827,25 @@ bool CSQLHelper::CalcMultiMeterPrice(const uint64_t idx, const float divider, co
 
 		int64_t cntrs[6];
 		for (int ii = 0; ii < 6; ii++)
-		{
 			cntrs[ii] = std::stoll(itt[ii]);
-			if (last_cntrs[ii] != (int64_t)-1)
-			{
-				int64_t total = cntrs[ii] - last_cntrs[ii];
-				total_price[ii] += ((static_cast<float>(total) / divider) * rec_price);
-				bResult = true;
-			}
-			last_cntrs[ii] = cntrs[ii];
+
+		if (last_cntrs[0] != (int64_t)-1)
+		{
+			int64_t deltaT1 = cntrs[0] - last_cntrs[0]; // Value1 = T1 usage
+			int64_t deltaR1 = cntrs[1] - last_cntrs[1]; // Value2 = R1 delivery
+			int64_t deltaT2 = cntrs[4] - last_cntrs[4]; // Value5 = T2 usage
+			int64_t deltaR2 = cntrs[5] - last_cntrs[5]; // Value6 = R2 delivery
+			total_price_usage1 += (static_cast<float>(deltaT1) / divider) * rec_price;
+			total_price_usage2 += (static_cast<float>(deltaT2) / divider) * rec_price;
+			total_price_deliv1 += (static_cast<float>(deltaR1) / divider) * priceR1;
+			total_price_deliv2 += (static_cast<float>(deltaR2) / divider) * priceR2;
+			bResult = true;
 		}
+		for (int ii = 0; ii < 6; ii++)
+			last_cntrs[ii] = cntrs[ii];
 	}
 
-	float price_usage = total_price[0] + total_price[4];
-	float price_deliver = total_price[1] + total_price[5];
-	float fPrice = price_usage - price_deliver;
+	float fPrice = (total_price_usage1 + total_price_usage2) - (total_price_deliv1 + total_price_deliv2);
 
 	if (fPrice > 100000)
 		return false;
