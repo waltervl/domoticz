@@ -11799,15 +11799,30 @@ bool CSQLHelper::CalcMultiMeterPrice(const uint64_t idx, const float divider, co
 	if (divider == 0)
 		return false;
 
-	// Delivery (return) energy must be priced at the return tariff rates, not the usage rates.
+	// Delivery (return) energy must be priced at the correct return tariff rates.
 	// Value1=T1 usage, Value2=R1 delivery, Value5=T2 usage, Value6=R2 delivery.
-	// The stored Price column holds the usage tariff (T1 or T2) active at log time.
-	// CostEnergyR1/R2 from preferences are the correct return prices.
+	// The stored Price column holds the price active at log time.
+	//
+	// Two modes:
+	//  - P1 internal (HourIdxElectricityDevice == 0x98765): stored price is the usage
+	//    tariff (T1 or T2), which differs from the return prices. Use CostEnergyR1/R2
+	//    from preferences for delivery so each tariff type is priced correctly.
+	//  - Dynamic tariff device (any other non-zero index): a single market price is
+	//    stored for all tariffs, so delivery should also use the stored rec_price.
+	int iHP_E_Idx = 0;
+	GetPreferencesVar("HourIdxElectricityDevice", iHP_E_Idx);
+	bool bUseStaticReturnPrices = (iHP_E_Idx == 0x98765);
+
 	int nValue = 0;
-	GetPreferencesVar("CostEnergyR1", nValue);
-	float priceR1 = static_cast<float>(nValue) / 10000.0F;
-	GetPreferencesVar("CostEnergyR2", nValue);
-	float priceR2 = static_cast<float>(nValue) / 10000.0F;
+	float priceR1 = 0.0F;
+	float priceR2 = 0.0F;
+	if (bUseStaticReturnPrices)
+	{
+		GetPreferencesVar("CostEnergyR1", nValue);
+		priceR1 = static_cast<float>(nValue) / 10000.0F;
+		GetPreferencesVar("CostEnergyR2", nValue);
+		priceR2 = static_cast<float>(nValue) / 10000.0F;
+	}
 
 	auto result = safe_query("SELECT Value1, Value2, Value3, Value4, Value5, Value6, Price FROM MultiMeter WHERE (DeviceRowID='%" PRIu64 "' AND Date>='%q' AND Date<='%q 00:00:00') ORDER BY Date ASC",
 		idx, szDateStart, szDateEnd);
@@ -11818,8 +11833,8 @@ bool CSQLHelper::CalcMultiMeterPrice(const uint64_t idx, const float divider, co
 	int64_t last_cntrs[6] = { (int64_t)-1,(int64_t)-1,(int64_t)-1,(int64_t)-1,(int64_t)-1,(int64_t)-1 };
 	float total_price_usage1 = 0; // T1 usage × stored usage price
 	float total_price_usage2 = 0; // T2 usage × stored usage price
-	float total_price_deliv1 = 0; // R1 delivery × CostEnergyR1
-	float total_price_deliv2 = 0; // R2 delivery × CostEnergyR2
+	float total_price_deliv1 = 0; // R1 delivery × return price (CostEnergyR1 or rec_price)
+	float total_price_deliv2 = 0; // R2 delivery × return price (CostEnergyR2 or rec_price)
 
 	for (const auto& itt : result)
 	{
@@ -11837,8 +11852,8 @@ bool CSQLHelper::CalcMultiMeterPrice(const uint64_t idx, const float divider, co
 			int64_t deltaR2 = cntrs[5] - last_cntrs[5]; // Value6 = R2 delivery
 			total_price_usage1 += (static_cast<float>(deltaT1) / divider) * rec_price;
 			total_price_usage2 += (static_cast<float>(deltaT2) / divider) * rec_price;
-			total_price_deliv1 += (static_cast<float>(deltaR1) / divider) * priceR1;
-			total_price_deliv2 += (static_cast<float>(deltaR2) / divider) * priceR2;
+			total_price_deliv1 += (static_cast<float>(deltaR1) / divider) * (bUseStaticReturnPrices ? priceR1 : rec_price);
+			total_price_deliv2 += (static_cast<float>(deltaR2) / divider) * (bUseStaticReturnPrices ? priceR2 : rec_price);
 			bResult = true;
 		}
 		for (int ii = 0; ii < 6; ii++)
